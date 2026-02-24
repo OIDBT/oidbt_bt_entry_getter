@@ -1,0 +1,9 @@
+/*
+!.vscode/
+!oidbt_bt_entry_getter/
+!.gitignore
+!README.md
+!ruff.toml
+!pyproject.toml
+
+__pycache__

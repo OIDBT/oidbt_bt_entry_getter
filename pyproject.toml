@@ -1,0 +1,31 @@
+[build-system]
+requires = [
+    "setuptools>=82",
+    #
+]
+
+[project]
+dynamic = ["version"]
+name    = "oidbt_bt_entry_getter"
+readme  = "README.md"
+# license = "AGPL-3.0-or-later"
+authors = [{ name = "op200" }]
+classifiers = [
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = [
+    "oidbt_bangumi_ani_getter",
+    "oidbt_torrent",
+]
+requires-python = ">=3.14"
+
+[project.urls]
+Homepage = "https://github.com/OIDBT/oidbt_bt_entry_getter"
+Source   = "https://github.com/OIDBT/oidbt_bt_entry_getter"
+
+[tool.setuptools.dynamic]
+version = { attr = "oidbt_bt_entry_getter.__version__" }
+
+[tool.setuptools.package-dir]
+oidbt_bt_entry_getter = "oidbt_bt_entry_getter"

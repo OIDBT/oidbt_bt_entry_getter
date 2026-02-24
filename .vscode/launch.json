@@ -1,0 +1,12 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python debug",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "oidbt_bt_entry_getter",
+            "console": "integratedTerminal",
+        },
+    ],
+}
