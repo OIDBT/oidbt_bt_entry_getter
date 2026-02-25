@@ -204,7 +204,10 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
 
             except httpx.HTTPStatusError as e:
                 log.error(
-                    "{} 状态码错误: {}", self.__class__.__name__, e.response.status_code
+                    "{} 状态码错误: {} {}",
+                    self.__class__.__name__,
+                    e.response.status_code,
+                    e.response.text,
                 )
                 raise _req_fialed from e
             except httpx.ConnectError as e:
