@@ -5,19 +5,21 @@ from functools import cache
 from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn
 
 import httpx
+import sqlmodel
 import zstandard
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import (
-    JSON,
     Column,
-    Field,
     LargeBinary,
     SQLModel,
+    String,
     TypeDecorator,
     and_,
     create_engine,
     delete,
+    func,
+    select,
     update,
 )
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -32,8 +34,32 @@ if TYPE_CHECKING:
     from sqlalchemy import Dialect
 
 
+class IdList(TypeDecorator):
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(
+        self,
+        value: list[int] | None,
+        dialect: Dialect,  # noqa: ARG002
+    ) -> str | None:
+        if not value:
+            return None
+        return ",".join(map(str, value))
+
+    def process_result_value(
+        self,
+        value: str | None,
+        dialect: Dialect,  # noqa: ARG002
+    ) -> list[int] | None:
+        if not value:
+            return None
+        return list(map(int, value.split(",")))
+
+
 class CompressedBinary(TypeDecorator):
     impl = LargeBinary
+    cache_ok = True
 
     ZSTD_LEVEL: ClassVar = 22
 
@@ -84,6 +110,7 @@ class Base_bt_entry_getter(ABC):
             timeout=timeout,
         )
         """HTTP Client"""
+
         if not database_filename.endswith(".db"):
             database_filename += ".db"
         self.sync_engine = create_engine(f"sqlite:///{database_filename}")
@@ -92,6 +119,7 @@ class Base_bt_entry_getter(ABC):
             f"sqlite+aiosqlite:///{database_filename}"
         )
         """异步 database engine"""
+
         self.__class__.Website_entry_data.metadata.create_all(self.sync_engine)
 
     def __del__(self) -> None:
@@ -318,25 +346,25 @@ class Base_bt_entry_getter(ABC):
     async def auto_req(
         self,
         *,
-        bgm_ani_datas_getter: Callable[
+        bgm_ani_all_data_getter: Callable[
             ..., Awaitable[Sequence[Bangumi_ani_getter.Bangumi_ani_data]]
         ],
     ) -> NoReturn:
         """自动循环爬取"""
         cycle_num: int = 1
         sleep_time: Literal[1, 10] = 1
-        bgm_ani_datas = await bgm_ani_datas_getter()
         while True:
             log.info("{} 进入第 {} 次循环", self.__class__.__name__, cycle_num)
 
             await self._del_data_unrefreshed()
 
+            bgm_ani_all_data = await bgm_ani_all_data_getter()
             async for website_entry in self.get_website_entry(
                 sleep_time=sleep_time,
                 fast_skip=cycle_num == 1,
             ):
                 id_list: list[int] = self.match_ani(
-                    website_entry=website_entry, bgm_ani_datas=bgm_ani_datas
+                    website_entry=website_entry, bgm_ani_datas=bgm_ani_all_data
                 )
                 await self.save_data(
                     self.website_entry_to_data(
@@ -348,7 +376,7 @@ class Base_bt_entry_getter(ABC):
 
             cycle_num += 1
             sleep_time = 10
-            bgm_ani_datas = await bgm_ani_datas_getter()
+            bgm_ani_all_data = await bgm_ani_all_data_getter()
 
     class Website_entry(BaseModel):
         title: str
@@ -378,18 +406,18 @@ class Base_bt_entry_getter(ABC):
     def page_link_head(self) -> str: ...
 
     class Website_entry_data(SQLModel):
-        page_link_point: str = Field(
+        page_link_point: str = sqlmodel.Field(
             description="条目网页链接的信息部分，可与头部拼接为完整链接",
             primary_key=True,
         )
-        magnet: bytes | None = Field(
+        magnet: bytes | None = sqlmodel.Field(
             description="手动从种子文件解析的磁链", sa_column=Column(CompressedBinary)
         )
-        match_id_list: list[int] = Field(
-            description="匹配的 Bangumi ID 列表", sa_column=Column(JSON)
+        match_id_list: list[int] | None = sqlmodel.Field(
+            description="匹配的 Bangumi ID 列表", sa_column=Column(IdList)
         )
 
-        unrefreshed_count: int = Field(
+        unrefreshed_count: int = sqlmodel.Field(
             description="数据未刷新次数，长时间未更新则判定为已删除条目，将删除该条数据",
             default=0,
         )
@@ -419,7 +447,22 @@ class Base_bt_entry_getter(ABC):
                     await session.merge(data)
             await session.commit()
 
-    async def get_data(self, primary_k_v: str, /) -> Website_entry_data | None:
+    async def get_all_data(self) -> Sequence[Website_entry_data]:
+        async with (
+            self.DATABASE_LOCK,
+            AsyncSession(self.async_engine) as session,
+        ):
+            return (await session.exec(select(self.Data_class))).all()
+
+    async def get_all_data_len(self) -> int:
+        async with (
+            self.DATABASE_LOCK,
+            AsyncSession(self.async_engine) as session,
+        ):
+            statement = select(func.count()).select_from(self.Data_class)
+            return (await session.exec(statement)).one()
+
+    async def get_data(self, primary_k_v: str | None, /) -> Website_entry_data | None:
         async with (
             self.DATABASE_LOCK,
             AsyncSession(self.async_engine) as session,

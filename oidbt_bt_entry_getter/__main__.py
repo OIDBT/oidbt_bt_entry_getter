@@ -28,9 +28,9 @@ async def run_example():
         database_filename=DATABASE_FILENAME, proxy=proxy_url
     )
     await asyncio.gather(
-        # bangumi_ani_getter.auto_req(),
+        bangumi_ani_getter.auto_req(),
         mikan_bt_entry_getter.auto_req(
-            bgm_ani_datas_getter=bangumi_ani_getter.get_data
+            bgm_ani_all_data_getter=bangumi_ani_getter.get_all_data
         ),
     )
 
