@@ -1,5 +1,7 @@
 import asyncio
+import re
 import xml.etree.ElementTree
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING, override
 
 import httpx
@@ -27,6 +29,81 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
     def get_website_name(cls) -> str:
         return "mikan"
 
+    async def match_ani_special(self, html_text: str, /) -> list[int]:
+        to_link = re.search(r"/Home/Bangumi/\d+", html_text)
+        if to_link is None:
+            log.warning(
+                "{} {} 没找到跳转链接",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+            )
+            return []
+        to_link = "https://mikanani.me" + to_link.group()
+        while True:
+            try:
+                response = await self.req(to_link)
+            except self.req_fialed as e:
+                log.error(
+                    "{} {} 请求失败: {}",
+                    self.__class__.__name__,
+                    self.match_ani_special.__name__,
+                    e,
+                )
+                continue
+            break
+
+        class _HTMLParser(HTMLParser):
+            """AI 写的解析逻辑"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.a_tag = None
+                self.in_p = False
+                self.p_class_match = False
+
+            def handle_starttag(self, tag, attrs) -> None:
+                attrs_dict = dict(attrs)
+                if tag == "p" and attrs_dict.get("class") == "bangumi-info":
+                    self.in_p = True
+                elif tag == "a" and self.in_p:
+                    self.a_tag = attrs_dict
+
+            def handle_endtag(self, tag) -> None:
+                if tag == "p":
+                    self.in_p = False
+
+        parser = _HTMLParser()
+        parser.feed(response.text)
+
+        a_tag = parser.a_tag
+        if a_tag is None:
+            log.error(
+                "{} {} 没找到 a 标签",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+            )
+            return []
+
+        href = a_tag.get("href")
+        if href is None:
+            log.error(
+                "{} {} a 标签没有 href",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+            )
+            return []
+
+        res = await self.match_ani_from_text(href)
+        if len(res) != 1:
+            log.error(
+                "{} {} a 标签的 href 格式错误: {}",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+                href,
+            )
+
+        return res
+
     @override
     def website_entry_to_data(
         self,
@@ -48,6 +125,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             magnet = torrent.get_magnet(tr=False).encode()
 
         return self.Website_entry_data_mikan(
+            title=website_entry.title,
             page_link_point=website_entry.page_link.removeprefix(self.page_link_head),
             magnet=magnet,
             match_id_list=id_list,
@@ -63,12 +141,6 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         torrent_num: int = 0
         """记录本次循环下载的 torrent 数量"""
 
-        class _req_fialed(Exception):
-            pass
-
-        class _req_end(Exception):
-            pass
-
         async def _req(
             page_num: int, /
         ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
@@ -78,7 +150,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             try:
                 log.debug("{} 开始请求第 {} 页", self.__class__.__name__, page_num)
                 url = f"https://mikanani.me/RSS/Classic/{page_num}"
-                response = await self.client.get(url)
+                response = await self.req(url)
                 log.debug(
                     "{} 请求头: {} {}",
                     self.__class__.__name__,
@@ -104,7 +176,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 xml_data_channel_items = xml_data_channel.findall("item")
                 if xml_data_channel_items is None:
                     # 没有 item 意味着翻页结束
-                    raise _req_end
+                    raise self.req_end
                 for item in xml_data_channel_items:
                     title = item.find("title")
                     assert title is not None, (
@@ -150,37 +222,53 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                         self.__class__.__name__,
                         title,
                     )
-                    async with self.client.stream(
-                        "GET", torrent_url
-                    ) as torrent_response:
-                        log.debug(
-                            "{} 请求头: {} {}",
-                            self.__class__.__name__,
-                            torrent_url,
-                            torrent_response.request.headers,
-                            print_level=log.LogLevel._detail,
-                        )
-                        try:
-                            torrent_response.raise_for_status()
-                        except httpx.HTTPStatusError as e:
-                            if e.response.status_code == 404:
+                    not_skip_download: bool = True
+                    while not_skip_download:
+                        async with self.client.stream(
+                            "GET", torrent_url
+                        ) as torrent_response:
+                            log.debug(
+                                "{} 请求头: {} {}",
+                                self.__class__.__name__,
+                                torrent_url,
+                                torrent_response.request.headers,
+                                print_level=log.LogLevel._detail,
+                            )
+                            try:
+                                torrent_response.raise_for_status()
+                            except httpx.HTTPStatusError as e:
+                                if e.response.status_code == 404:
+                                    log.warning(
+                                        "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
+                                        self.__class__.__name__,
+                                        f"{title} {page_link}",
+                                    )
+                                    torrent_num_new += 1
+                                    not_skip_download = False
+                                    continue
+                                raise
+                            except httpx.ReadTimeout as e:
                                 log.warning(
-                                    "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
+                                    "{} 下载失败，重试: {} {!r}",
                                     self.__class__.__name__,
-                                    f"{title} {page_link}",
+                                    e,
+                                    e,
                                 )
-                                torrent_num_new += 1
                                 continue
-                            raise
-                        log.debug(
-                            "{} 响应头: {} {} {}",
-                            self.__class__.__name__,
-                            torrent_response.http_version,
-                            torrent_response.status_code,
-                            torrent_response.headers,
-                            print_level=log.LogLevel._detail,
-                        )
-                        torrent = await torrent_response.aread()
+
+                            log.debug(
+                                "{} 响应头: {} {} {}",
+                                self.__class__.__name__,
+                                torrent_response.http_version,
+                                torrent_response.status_code,
+                                torrent_response.headers,
+                                print_level=log.LogLevel._detail,
+                            )
+                            torrent = await torrent_response.aread()
+
+                        break
+                    else:
+                        break
 
                     torrent_num_new += 1
                     log.debug(
@@ -202,23 +290,6 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
 
                 torrent_num = torrent_num_new
 
-            except httpx.HTTPStatusError as e:
-                log.error(
-                    "{} 状态码错误: {} {}",
-                    self.__class__.__name__,
-                    e.response.status_code,
-                    e.response.text,
-                )
-                raise _req_fialed from e
-            except httpx.ConnectError as e:
-                log.error("{} 连接失败: {!r}", self.__class__.__name__, e)
-                raise _req_fialed from e
-            except httpx.TimeoutException as e:
-                log.warning("{} 请求超时", self.__class__.__name__)
-                raise _req_fialed from e
-            except httpx.ReadError as e:
-                log.warning("{} 未知错误: {} {!r}", self.__class__.__name__, e, e)
-                raise _req_fialed from e
             except ValidationError as e:
                 log.error("{} 类型错误: {!r}", self.__class__.__name__, e)
                 raise
@@ -228,10 +299,10 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             try:
                 async for website_entry in _req(page_num):
                     yield website_entry
-            except _req_fialed as e:
+            except self.req_fialed as e:
                 log.warning("{} 单次请求失败: {}", self.__class__.__name__, e)
                 continue
-            except _req_end:
+            except self.req_end:
                 log.debug("{} 本次翻页循环结束", self.__class__.__name__)
                 break
 

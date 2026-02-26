@@ -1,8 +1,9 @@
 import asyncio
-from abc import ABC, abstractmethod
+import re
+from abc import ABC, ABCMeta, abstractmethod
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, ClassVar, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
 
 import httpx
 import sqlmodel
@@ -92,9 +93,20 @@ class CompressedBinary(TypeDecorator):
         return zstandard.decompress(value)
 
 
-class Base_bt_entry_getter(ABC):
+class LockMeta(ABCMeta):
+    """为每个子类自动添加类级别的 lock"""
+
+    def __new__(mcls, name, bases, namespace, /, **kwargs: Any):  # noqa: ANN204
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+        cls.REQ_LOCK = asyncio.Lock()  # pyright: ignore[reportAttributeAccessIssue]
+        return cls
+
+
+class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     DATABASE_LOCK: ClassVar = asyncio.Lock()
     UNREFRESHED_THRESHOLD: ClassVar = 20
+    REQ_LOCK: ClassVar[asyncio.Lock]
+    """每个子类一个 lock"""
 
     def __init__(
         self,
@@ -123,9 +135,88 @@ class Base_bt_entry_getter(ABC):
         self.__class__.Website_entry_data.metadata.create_all(self.sync_engine)
 
     def __del__(self) -> None:
-        asyncio.run(self.client.aclose())
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self.client.aclose())  # noqa: RUF006
+        except RuntimeError:
+            asyncio.run(self.client.aclose())
 
-    def match_ani(
+    class req_fialed(Exception):
+        pass
+
+    class req_end(Exception):
+        pass
+
+    async def req(self, url: str, /) -> httpx.Response:
+        try:
+            async with self.REQ_LOCK:
+                response = await self.client.get(url)
+            log.debug(
+                "{} 请求头: {} {}",
+                self.__class__.__name__,
+                url,
+                response.request.headers,
+                print_level=log.LogLevel._detail,
+            )
+            response.raise_for_status()
+            log.debug(
+                "{} 响应头: {} {} {}",
+                self.__class__.__name__,
+                response.http_version,
+                response.status_code,
+                response.headers,
+                print_level=log.LogLevel._detail,
+            )
+
+        except httpx.HTTPStatusError as e:
+            log.error(
+                "{} 状态码错误: {} {}",
+                self.__class__.__name__,
+                e.response.status_code,
+                e.response.text,
+            )
+            raise self.req_fialed from e
+        except httpx.ConnectError as e:
+            log.error("{} 连接失败: {!r}", self.__class__.__name__, e)
+            raise self.req_fialed from e
+        except httpx.RemoteProtocolError as e:
+            log.error("{} 服务器违反协议: {!r}", self.__class__.__name__, e)
+            raise self.req_fialed from e
+        except httpx.TimeoutException as e:
+            log.warning("{} 请求超时", self.__class__.__name__)
+            raise self.req_fialed from e
+        except httpx.ReadError as e:
+            log.warning("{} 未知错误: {} {!r}", self.__class__.__name__, e, e)
+            raise self.req_fialed from e
+
+        else:
+            return response
+
+    async def match_ani_from_text(self, html_text: str, /) -> list[int]:
+        """
+        直接从网页文本匹配 Bangumi ID
+
+        :return: Bangumi ID list
+        """
+        return list(
+            map(
+                int,
+                re.findall(
+                    r"(?:bgm\.tv|bangumi\.tv|chii\.in)/subject/(\d+)", html_text
+                ),
+            )
+        )
+
+    @abstractmethod
+    async def match_ani_special(self, html_text: str, /) -> list[int]:
+        """
+        特殊匹配规则，例如部分网站有记录 Bangumi ID
+
+        :return: Bangumi ID list
+        """
+        ...
+
+    async def match_ani(
         self,
         *,
         website_entry: Website_entry,
@@ -134,7 +225,7 @@ class Base_bt_entry_getter(ABC):
         """
         根据 BT 发布页标题匹配 Bangumi ID
 
-        匹配度优先级: 原名 > 中文名 > 别名
+        匹配度优先级: 特殊匹配 > 原名 > 中文名 > 别名
         同级内优先级: 匹配文本长度
 
         :return: Bangumi ID, 按匹配度排序
@@ -324,14 +415,43 @@ class Base_bt_entry_getter(ABC):
                             Match_item(id=data.id, match_len=len(new_name))
                         )
 
-        return [
-            it.id
-            for it in (
-                *sorted_match_list(match_list_name),
-                *sorted_match_list(match_list_name_cn),
-                *sorted_match_list(match_list_name_alias),
+        # 特殊匹配
+        while True:
+            try:
+                response = await self.req(website_entry.page_link)
+            except self.req_fialed as e:
+                log.error(
+                    "{} {} 请求失败: {}",
+                    self.__class__.__name__,
+                    self.match_ani_special.__name__,
+                    e,
+                )
+                continue
+            break
+
+        match_ani_special_ids = await self.match_ani_special(response.text)
+        match_ani_from_text_ids = await self.match_ani_from_text(response.text)
+        log.debug(
+            "{} match_ani_special: {} {}",
+            self.__class__.__name__,
+            match_ani_special_ids,
+            match_ani_from_text_ids,
+        )
+
+        return list(
+            dict.fromkeys(
+                match_ani_special_ids
+                + match_ani_from_text_ids
+                + [
+                    it.id
+                    for it in (
+                        *sorted_match_list(match_list_name),
+                        *sorted_match_list(match_list_name_cn),
+                        *sorted_match_list(match_list_name_alias),
+                    )
+                ]
             )
-        ]
+        )
 
     @abstractmethod
     def website_entry_to_data(
@@ -352,7 +472,7 @@ class Base_bt_entry_getter(ABC):
     ) -> NoReturn:
         """自动循环爬取"""
         cycle_num: int = 1
-        sleep_time: Literal[1, 10] = 1
+        sleep_time: Literal[0, 1] = 0
         while True:
             log.info("{} 进入第 {} 次循环", self.__class__.__name__, cycle_num)
 
@@ -361,9 +481,9 @@ class Base_bt_entry_getter(ABC):
             bgm_ani_all_data = await bgm_ani_all_data_getter()
             async for website_entry in self.get_website_entry(
                 sleep_time=sleep_time,
-                fast_skip=cycle_num == 1,
+                fast_skip=bool(cycle_num & 1),
             ):
-                id_list: list[int] = self.match_ani(
+                id_list: list[int] = await self.match_ani(
                     website_entry=website_entry, bgm_ani_datas=bgm_ani_all_data
                 )
                 await self.save_data(
@@ -375,7 +495,7 @@ class Base_bt_entry_getter(ABC):
             await self._add_data_unrefreshed_count()
 
             cycle_num += 1
-            sleep_time = 10
+            sleep_time = 1
             bgm_ani_all_data = await bgm_ani_all_data_getter()
 
     class Website_entry(BaseModel):
@@ -406,6 +526,7 @@ class Base_bt_entry_getter(ABC):
     def page_link_head(self) -> str: ...
 
     class Website_entry_data(SQLModel):
+        title: str
         page_link_point: str = sqlmodel.Field(
             description="条目网页链接的信息部分，可与头部拼接为完整链接",
             primary_key=True,
