@@ -209,6 +209,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                             self.__class__.__name__,
                             torrent_num_new,
                             title,
+                            print_level=log.LogLevel._detail,
                         )
                         torrent_num_new += 1
                         continue
