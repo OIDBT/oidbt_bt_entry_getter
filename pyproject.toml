@@ -14,8 +14,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "oidbt_bangumi_ani_getter",
-    "oidbt_torrent",
+    "oidbt_bangumi_ani_getter @ git+https://github.com/OIDBT/oidbt_bangumi_ani_getter.git",
+    "oidbt_torrent @ git+https://github.com/OIDBT/oidbt_torrent.git",
 ]
 requires-python = ">=3.14"
 
