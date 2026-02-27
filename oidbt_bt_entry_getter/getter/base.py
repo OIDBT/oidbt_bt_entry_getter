@@ -180,13 +180,16 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             log.error("{} 连接失败: {!r}", self.__class__.__name__, e)
             raise self.req_fialed from e
         except httpx.RemoteProtocolError as e:
-            log.error("{} 服务器违反协议: {!r}", self.__class__.__name__, e)
+            # 大概率代理异常导致的
+            log.warning("{} 服务器违反协议: {!r}", self.__class__.__name__, e)
             raise self.req_fialed from e
         except httpx.TimeoutException as e:
             log.warning("{} 请求超时", self.__class__.__name__)
             raise self.req_fialed from e
-        except httpx.ReadError as e:
-            log.warning("{} 未知错误: {} {!r}", self.__class__.__name__, e, e)
+        except httpx.NetworkError as e:
+            log.error(
+                "{} 未知网络错误: {} {!r}", self.__class__.__name__, e, e, deep=True
+            )
             raise self.req_fialed from e
 
         else:
@@ -526,6 +529,12 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     def page_link_head(self) -> str: ...
 
     class Website_entry_data(SQLModel):
+        """
+        SQL 表基类
+
+        getter 子类必须继承一个不同命名的子表类
+        """
+
         title: str
         page_link_point: str = sqlmodel.Field(
             description="条目网页链接的信息部分，可与头部拼接为完整链接",
@@ -546,6 +555,7 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     @property
     @abstractmethod
     def Data_class(self) -> type[Website_entry_data]:
+        """返回当前类对应的 SQL 表类"""
         return self.Website_entry_data
 
     async def save_data(

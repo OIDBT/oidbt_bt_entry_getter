@@ -25,10 +25,6 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
     def page_link_head(self) -> str:
         return "https://mikanani.me/Home/Episode/"
 
-    @classmethod
-    def get_website_name(cls) -> str:
-        return "mikan"
-
     async def match_ani_special(self, html_text: str, /) -> list[int]:
         to_link = re.search(r"/Home/Bangumi/\d+", html_text)
         if to_link is None:
@@ -247,7 +243,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                                     not_skip_download = False
                                     continue
                                 raise
-                            except httpx.ReadTimeout as e:
+                            except httpx.NetworkError as e:
                                 log.warning(
                                     "{} 下载失败，重试: {} {!r}",
                                     self.__class__.__name__,
