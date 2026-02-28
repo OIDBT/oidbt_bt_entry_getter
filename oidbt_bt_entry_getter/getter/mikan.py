@@ -306,4 +306,10 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             except self.req_end:
                 log.debug("{} 本次翻页循环结束", self.__class__.__name__)
                 break
-
+
+            await asyncio.sleep(sleep_time)
+            page_num += 1
+
+    @property
+    def Data_class(self):
+        return self.Website_entry_data_mikan
