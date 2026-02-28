@@ -221,47 +221,51 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                     )
                     not_skip_download: bool = True
                     while not_skip_download:
-                        async with self.client.stream(
-                            "GET", torrent_url
-                        ) as torrent_response:
-                            log.debug(
-                                "{} 请求头: {} {}",
-                                self.__class__.__name__,
-                                torrent_url,
-                                torrent_response.request.headers,
-                                print_level=log.LogLevel._detail,
-                            )
-                            try:
-                                torrent_response.raise_for_status()
-                            except httpx.HTTPStatusError as e:
-                                if e.response.status_code == 404:
-                                    log.warning(
-                                        "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
-                                        self.__class__.__name__,
-                                        f"{title} {page_link}",
-                                    )
-                                    torrent_num_new += 1
-                                    not_skip_download = False
-                                    continue
-                                raise
-                            except httpx.NetworkError as e:
-                                log.warning(
-                                    "{} 下载失败，重试: {} {!r}",
+                        try:
+                            async with self.client.stream(
+                                "GET", torrent_url
+                            ) as torrent_response:
+                                log.debug(
+                                    "{} 请求头: {} {}",
                                     self.__class__.__name__,
-                                    e,
-                                    e,
+                                    torrent_url,
+                                    torrent_response.request.headers,
+                                    print_level=log.LogLevel._detail,
                                 )
+                                torrent_response.raise_for_status()
+                                torrent = await torrent_response.aread()
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code == 404:
+                                log.warning(
+                                    "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
+                                    self.__class__.__name__,
+                                    f"{title} {page_link}",
+                                )
+                                torrent_num_new += 1
+                                not_skip_download = False
                                 continue
-
-                            log.debug(
-                                "{} 响应头: {} {} {}",
+                            raise
+                        except (
+                            httpx.NetworkError,
+                            httpx.RemoteProtocolError,
+                            httpx.ReadTimeout,
+                        ) as e:
+                            log.warning(
+                                "{} 下载失败，重试: {} {!r}",
                                 self.__class__.__name__,
-                                torrent_response.http_version,
-                                torrent_response.status_code,
-                                torrent_response.headers,
-                                print_level=log.LogLevel._detail,
+                                e,
+                                e,
                             )
-                            torrent = await torrent_response.aread()
+                            continue
+
+                        log.debug(
+                            "{} 响应头: {} {} {}",
+                            self.__class__.__name__,
+                            torrent_response.http_version,
+                            torrent_response.status_code,
+                            torrent_response.headers,
+                            print_level=log.LogLevel._detail,
+                        )
 
                         break
                     else:
@@ -302,10 +306,4 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             except self.req_end:
                 log.debug("{} 本次翻页循环结束", self.__class__.__name__)
                 break
-
-            await asyncio.sleep(sleep_time)
-            page_num += 1
-
-    @property
-    def Data_class(self):
-        return self.Website_entry_data_mikan
+
