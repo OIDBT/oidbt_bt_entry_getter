@@ -28,22 +28,22 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
     async def match_ani_special(self, html_text: str, /) -> list[int]:
         to_link = re.search(r"/Home/Bangumi/\d+", html_text)
         if to_link is None:
-            log.warning(
+            log.debug(
                 "{} {} 没找到跳转链接",
                 self.__class__.__name__,
                 self.match_ani_special.__name__,
             )
             return []
         to_link = "https://mikanani.me" + to_link.group()
+        log.debug("to_link = {}", to_link)
         while True:
             try:
                 response = await self.req(to_link)
-            except self.req_fialed as e:
+            except self.req_fialed:
                 log.error(
-                    "{} {} 请求失败: {}",
+                    "{} {} 请求失败",
                     self.__class__.__name__,
                     self.match_ani_special.__name__,
-                    e,
                 )
                 continue
             break
@@ -116,6 +116,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 e,
                 website_entry.title,
                 website_entry.page_link,
+                deep=True,
             )
         else:
             magnet = torrent.get_magnet(tr=False).encode()
@@ -137,8 +138,14 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         torrent_num: int = 0
         """记录本次循环下载的 torrent 数量"""
 
+        class req_end(Exception):
+            pass
+
         async def _req(
-            page_num: int, /
+            page_num: int,
+            /,
+            *,
+            fast_skip: bool,
         ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
             """返回 None 表示 page 超出范围"""
             nonlocal torrent_num
@@ -147,22 +154,6 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 log.debug("{} 开始请求第 {} 页", self.__class__.__name__, page_num)
                 url = f"https://mikanani.me/RSS/Classic/{page_num}"
                 response = await self.req(url)
-                log.debug(
-                    "{} 请求头: {} {}",
-                    self.__class__.__name__,
-                    url,
-                    response.request.headers,
-                    print_level=log.LogLevel._detail,
-                )
-                response.raise_for_status()
-                log.debug(
-                    "{} 响应头: {} {} {}",
-                    self.__class__.__name__,
-                    response.http_version,
-                    response.status_code,
-                    response.headers,
-                    print_level=log.LogLevel._detail,
-                )
 
                 xml_data = xml.etree.ElementTree.fromstring(response.text)
                 xml_data_channel = xml_data.find("channel")
@@ -172,7 +163,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 xml_data_channel_items = xml_data_channel.findall("item")
                 if xml_data_channel_items is None:
                     # 没有 item 意味着翻页结束
-                    raise self.req_end
+                    raise req_end
                 for item in xml_data_channel_items:
                     title = item.find("title")
                     assert title is not None, (
@@ -273,7 +264,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
 
                     torrent_num_new += 1
                     log.debug(
-                        "{} 下载第 {} 个 torrent 体积: {} from {} {}",
+                        "{} 下载第 {:,} 个 torrent 体积: {} from {} {}",
                         self.__class__.__name__,
                         torrent_num_new,
                         get_size_str(torrent),
@@ -292,18 +283,24 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 torrent_num = torrent_num_new
 
             except ValidationError as e:
-                log.error("{} 类型错误: {!r}", self.__class__.__name__, e)
+                log.error("{} 类型错误: {!r}", self.__class__.__name__, e, deep=True)
                 raise
 
-        page_num: int = 1
+        # fast skip 模式从 1 开始，普通模式从 2 开始且间歇性请求第 1 页
+        page_num: int = 2 - fast_skip
         while True:
             try:
-                async for website_entry in _req(page_num):
-                    yield website_entry
+                for agen in [_req(page_num, fast_skip=fast_skip)] + (
+                    [_req(1, fast_skip=True)]
+                    if not fast_skip and page_num % 6 == 0
+                    else []
+                ):
+                    async for website_entry in agen:
+                        yield website_entry
             except self.req_fialed as e:
                 log.warning("{} 单次请求失败: {}", self.__class__.__name__, e)
                 continue
-            except self.req_end:
+            except req_end:
                 log.debug("{} 本次翻页循环结束", self.__class__.__name__)
                 break
 

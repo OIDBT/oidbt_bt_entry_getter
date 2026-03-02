@@ -80,6 +80,7 @@ class CompressedBinary(TypeDecorator):
             self.ZSTD_LEVEL,
             get_size_str(value),
             get_size_str(comp),
+            print_level=log.LogLevel._detail,
         )
         return comp
 
@@ -114,14 +115,18 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         database_filename: str,
         proxy: httpx._types.ProxyTypes | None = None,
         timeout: httpx._types.TimeoutTypes = 10,
+        cookies: dict[str, str] | None = None,
+        email: str | None = None,
     ) -> None:
         self.client = httpx.AsyncClient(
             http2=True,
             follow_redirects=True,  # 允许重定向
             proxy=proxy,
             timeout=timeout,
+            headers={k: v for k, v in {"From": email}.items() if v is not None},
         )
         """HTTP Client"""
+        self.cookies = cookies
 
         if not database_filename.endswith(".db"):
             database_filename += ".db"
@@ -144,56 +149,90 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     class req_fialed(Exception):
         pass
 
-    class req_end(Exception):
-        pass
-
     async def req(self, url: str, /) -> httpx.Response:
-        try:
-            async with self.REQ_LOCK:
-                response = await self.client.get(url)
-            log.debug(
-                "{} 请求头: {} {}",
-                self.__class__.__name__,
-                url,
-                response.request.headers,
-                print_level=log.LogLevel._detail,
-            )
-            response.raise_for_status()
-            log.debug(
-                "{} 响应头: {} {} {}",
-                self.__class__.__name__,
-                response.http_version,
-                response.status_code,
-                response.headers,
-                print_level=log.LogLevel._detail,
-            )
+        req_num: int = 1
 
-        except httpx.HTTPStatusError as e:
-            log.error(
-                "{} 状态码错误: {} {}",
-                self.__class__.__name__,
-                e.response.status_code,
-                e.response.text,
-            )
-            raise self.req_fialed from e
-        except httpx.ConnectError as e:
-            log.error("{} 连接失败: {!r}", self.__class__.__name__, e)
-            raise self.req_fialed from e
-        except httpx.RemoteProtocolError as e:
-            # 大概率代理异常导致的
-            log.warning("{} 服务器违反协议: {!r}", self.__class__.__name__, e)
-            raise self.req_fialed from e
-        except httpx.TimeoutException as e:
-            log.warning("{} 请求超时", self.__class__.__name__)
-            raise self.req_fialed from e
-        except httpx.NetworkError as e:
-            log.error(
-                "{} 未知网络错误: {} {!r}", self.__class__.__name__, e, e, deep=True
-            )
-            raise self.req_fialed from e
+        async def _req() -> httpx.Response:
+            try:
+                async with self.REQ_LOCK:
+                    response = await self.client.get(
+                        url, cookies=self.cookies if req_num > 2 else None
+                    )
+                log.debug(
+                    "{} 请求头: {} {}",
+                    self.__class__.__name__,
+                    url,
+                    response.request.headers,
+                    print_level=log.LogLevel._detail,
+                )
+                response.raise_for_status()
+                log.debug(
+                    "{} 响应头: {} {} {}",
+                    self.__class__.__name__,
+                    response.http_version,
+                    response.status_code,
+                    response.headers,
+                    print_level=log.LogLevel._detail,
+                )
 
-        else:
-            return response
+            except httpx.HTTPStatusError as e:
+                log.error(
+                    "{} 状态码错误: {} {}",
+                    self.__class__.__name__,
+                    e.response.status_code,
+                    e.request.url,
+                )
+                raise self.req_fialed from e
+            except httpx.ConnectError as e:
+                log.error(
+                    "{} 连接失败: {!r} {}", self.__class__.__name__, e, e.request.url
+                )
+                raise self.req_fialed from e
+            except httpx.RemoteProtocolError as e:
+                # 大概率代理异常导致的
+                log.warning(
+                    "{} 服务器违反协议: {!r} {}",
+                    self.__class__.__name__,
+                    e,
+                    e.request.url,
+                )
+                raise self.req_fialed from e
+            except httpx.TimeoutException as e:
+                log.warning("{} 请求超时 {}", self.__class__.__name__, e.request.url)
+                raise self.req_fialed from e
+            except httpx.NetworkError as e:
+                log.error(
+                    "{} 未知网络错误: {} {!r} {}",
+                    self.__class__.__name__,
+                    e,
+                    e,
+                    e.request.url,
+                    deep=True,
+                )
+                raise self.req_fialed from e
+
+            else:
+                return response
+
+        while True:
+            try:
+                return await _req()
+            except self.req_fialed:
+                log.warning(
+                    "{} {} 重试 {} 次",
+                    self.__class__.__name__,
+                    self.req.__name__,
+                    req_num,
+                )
+                if req_num > 9:
+                    log.error(
+                        "{} {} 重试次数过高，放弃重试",
+                        self.__class__.__name__,
+                        self.req.__name__,
+                    )
+                    raise
+                req_num += 1
+                continue
 
     async def match_ani_from_text(self, html_text: str, /) -> list[int]:
         """
@@ -419,40 +458,49 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
                         )
 
         # 特殊匹配
+        _url = website_entry.page_link
+        response = None
         while True:
             try:
-                response = await self.req(website_entry.page_link)
-            except self.req_fialed as e:
+                response = await self.req(_url)
+            except self.req_fialed:
                 log.error(
-                    "{} {} 请求失败: {}",
+                    "{} 请求失败 {}",
                     self.__class__.__name__,
-                    self.match_ani_special.__name__,
-                    e,
+                    _url,
                 )
                 continue
             break
 
-        match_ani_special_ids = await self.match_ani_special(response.text)
-        match_ani_from_text_ids = await self.match_ani_from_text(response.text)
+        if response is None:
+            match_ani_special_ids = []
+            match_ani_from_text_ids = []
+        else:
+            match_ani_special_ids = await self.match_ani_special(response.text)
+            match_ani_from_text_ids = await self.match_ani_from_text(response.text)
+
+        match_ani_from_name_ids = [
+            it.id
+            for it in (
+                *sorted_match_list(match_list_name),
+                *sorted_match_list(match_list_name_cn),
+                *sorted_match_list(match_list_name_alias),
+            )
+        ]
+
         log.debug(
-            "{} match_ani_special: {} {}",
+            "{} match_ani_special: {} {} {}",
             self.__class__.__name__,
             match_ani_special_ids,
             match_ani_from_text_ids,
+            match_ani_from_name_ids,
         )
 
         return list(
             dict.fromkeys(
                 match_ani_special_ids
                 + match_ani_from_text_ids
-                + [
-                    it.id
-                    for it in (
-                        *sorted_match_list(match_list_name),
-                        *sorted_match_list(match_list_name_cn),
-                        *sorted_match_list(match_list_name_alias),
-                    )
-                ]
+                + match_ani_from_name_ids
             )
         )
 
