@@ -133,7 +133,6 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         self,
         *,
         sleep_time: int,
-        fast_skip: bool,
     ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
         torrent_num: int = 0
         """记录本次循环下载的 torrent 数量"""
@@ -142,12 +141,8 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             pass
 
         async def _req(
-            page_num: int,
-            /,
-            *,
-            fast_skip: bool,
+            page_num: int, /
         ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
-            """返回 None 表示 page 超出范围"""
             nonlocal torrent_num
             torrent_num_new = torrent_num
             try:
@@ -192,18 +187,29 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                         f"{self.__class__.__name__} RSS 的 XML 结构 <item><enclosure> 没有属性 url"
                     )
 
-                    if fast_skip and await self.get_data(
+                    if _data := await self.get_data(
                         page_link.removeprefix(self.page_link_head)
                     ):
                         log.debug(
-                            "{} 跳过第 {} 个种子 {}",
+                            "{} 跳过第 {} 个种子 {} {}",
                             self.__class__.__name__,
                             torrent_num_new,
                             title,
+                            page_link,
                             print_level=log.LogLevel._detail,
                         )
                         torrent_num_new += 1
                         continue
+                    else:
+                        log.debug(
+                            "{} 跳过第 {} 个种子 {} {} 失败: data = {}",
+                            self.__class__.__name__,
+                            torrent_num_new,
+                            title,
+                            page_link,
+                            _data,
+                            print_level=log.LogLevel._detail,
+                        )
 
                     log.debug(
                         "{} 开始下载 {}",
@@ -286,26 +292,44 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 log.error("{} 类型错误: {!r}", self.__class__.__name__, e, deep=True)
                 raise
 
-        # fast skip 模式从 1 开始，普通模式从 2 开始且间歇性请求第 1 页
-        page_num: int = 2 - fast_skip
+        page_num: int = 1
+        """页数"""
+        skip_page_num: int = 1
+        """跳过的页数"""
+        pre_page_num: int = 0
+        """上次请求的页数"""
         while True:
+            all_skip: bool = True
             try:
-                for agen in [_req(page_num, fast_skip=fast_skip)] + (
-                    [_req(1, fast_skip=True)]
-                    if not fast_skip and page_num % 6 == 0
-                    else []
-                ):
-                    async for website_entry in agen:
-                        yield website_entry
+                async for website_entry in _req(page_num):
+                    yield website_entry
+                    all_skip = False
             except self.req_fialed as e:
                 log.warning("{} 单次请求失败: {}", self.__class__.__name__, e)
                 continue
             except req_end:
-                log.debug("{} 本次翻页循环结束", self.__class__.__name__)
-                break
+                if page_num - pre_page_num == 1:
+                    log.info(
+                        "{} 本次翻页循环结束，一共 {} 页",
+                        self.__class__.__name__,
+                        pre_page_num,
+                    )
+                    break
+                all_skip = False
 
             await asyncio.sleep(sleep_time)
-            page_num += 1
+            # 全部跳过则每次多跳，直到没有全跳时，从上次请求的位置开始重置
+            _page_num = page_num
+            if all_skip:
+                skip_page_num *= 2
+                page_num += skip_page_num
+            else:
+                skip_page_num = 1
+                if page_num < pre_page_num:
+                    page_num += 1
+                else:
+                    page_num = pre_page_num + 1
+            pre_page_num = _page_num
 
     @property
     def Data_class(self):

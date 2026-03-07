@@ -1,9 +1,10 @@
 import asyncio
+import datetime
 import re
 from abc import ABC, ABCMeta, abstractmethod
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, override
 
 import httpx
 import sqlmodel
@@ -21,7 +22,6 @@ from sqlmodel import (
     delete,
     func,
     select,
-    update,
 )
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -29,7 +29,7 @@ from ..log import log
 from ..utils import get_size_str
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
 
     from oidbt_bangumi_ani_getter import Bangumi_ani_getter
     from sqlalchemy import Dialect
@@ -39,19 +39,21 @@ class IdList(TypeDecorator):
     impl = String
     cache_ok = True
 
+    @override
     def process_bind_param(
         self,
         value: list[int] | None,
-        dialect: Dialect,  # noqa: ARG002
+        dialect: Dialect,
     ) -> str | None:
         if not value:
             return None
         return ",".join(map(str, value))
 
+    @override
     def process_result_value(
         self,
         value: str | None,
-        dialect: Dialect,  # noqa: ARG002
+        dialect: Dialect,
     ) -> list[int] | None:
         if not value:
             return None
@@ -64,10 +66,11 @@ class CompressedBinary(TypeDecorator):
 
     ZSTD_LEVEL: ClassVar = 22
 
+    @override
     def process_bind_param(
         self,
         value: bytes | str | None,
-        dialect: Dialect,  # noqa: ARG002
+        dialect: Dialect,
     ) -> bytes | None:
         if not value:
             return None
@@ -84,10 +87,11 @@ class CompressedBinary(TypeDecorator):
         )
         return comp
 
+    @override
     def process_result_value(
         self,
         value: bytes | None,
-        dialect: Dialect,  # noqa: ARG002
+        dialect: Dialect,
     ) -> bytes | None:
         if not value:
             return None
@@ -97,7 +101,7 @@ class CompressedBinary(TypeDecorator):
 class LockMeta(ABCMeta):
     """为每个子类自动添加类级别的 lock"""
 
-    def __new__(mcls, name, bases, namespace, /, **kwargs: Any):  # noqa: ANN204
+    def __new__(mcls, name, bases, namespace, /, **kwargs: Any) -> LockMeta:
         cls = super().__new__(mcls, name, bases, namespace, **kwargs)
         cls.REQ_LOCK = asyncio.Lock()  # pyright: ignore[reportAttributeAccessIssue]
         return cls
@@ -105,7 +109,7 @@ class LockMeta(ABCMeta):
 
 class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     DATABASE_LOCK: ClassVar = asyncio.Lock()
-    UNREFRESHED_THRESHOLD: ClassVar = 20
+    UPDATE_DEL_THRESHOLD: ClassVar = datetime.timedelta(days=30)
     REQ_LOCK: ClassVar[asyncio.Lock]
     """每个子类一个 lock"""
 
@@ -118,6 +122,8 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         cookies: dict[str, str] | None = None,
         email: str | None = None,
     ) -> None:
+        assert isinstance(self.REQ_LOCK, asyncio.Lock)
+
         self.client = httpx.AsyncClient(
             http2=True,
             follow_redirects=True,  # 允许重定向
@@ -277,8 +283,12 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         class Match_item:
             id: int
             match_len: int
+            rank: int
 
-        def sorted_match_list(match_list: Sequence[Match_item]) -> list[Match_item]:
+            def __hash__(self) -> int:
+                return hash((self.id, self.match_len, self.rank))
+
+        def sorted_match_list(match_list: Iterable[Match_item]) -> list[Match_item]:
             return sorted(match_list, key=lambda it: it.match_len, reverse=True)
 
         strip_name_trans_table = str.maketrans(
@@ -416,46 +426,36 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
 
         @cache
         def strip_name(name: str) -> str:
-            return "".join(name.translate(strip_name_trans_table).strip().split())
+            return "".join(
+                name.translate(strip_name_trans_table).strip().split()
+            ).lower()
 
         title: str = website_entry.title
+        new_title = strip_name(title)
 
-        match_list_name: list[Match_item] = []
-        match_list_name_cn: list[Match_item] = []
-        match_list_name_alias: list[Match_item] = []
+        match_list_name: set[Match_item] = set()
         for data in bgm_ani_datas:
-            new_title = strip_name(title)
 
-            if data.name:
-                if data.name in title:
-                    match_list_name.append(
-                        Match_item(id=data.id, match_len=len(data.name))
-                    )
-                elif (new_name := strip_name(data.name)) in new_title:
-                    match_list_name.append(
-                        Match_item(id=data.id, match_len=len(new_name))
-                    )
+            def _add_match(
+                name: str, data: Bangumi_ani_getter.Bangumi_ani_data
+            ) -> None:
+                if name:
+                    if name in title:
+                        match_list_name.add(
+                            Match_item(id=data.id, match_len=len(name), rank=data.rank)
+                        )
+                    elif (new_name := strip_name(name)) in new_title:
+                        match_list_name.add(
+                            Match_item(
+                                id=data.id, match_len=len(new_name), rank=data.rank
+                            )
+                        )
 
-            if data.name_cn:
-                if data.name_cn in title:
-                    match_list_name_cn.append(
-                        Match_item(id=data.id, match_len=len(data.name_cn))
-                    )
-                elif (new_name := strip_name(data.name)) in new_title:
-                    match_list_name_cn.append(
-                        Match_item(id=data.id, match_len=len(new_name))
-                    )
+            _add_match(data.name, data)
+            _add_match(data.name_cn, data)
 
             for n in data.name_alias:
-                if n:
-                    if n in title:
-                        match_list_name_alias.append(
-                            Match_item(id=data.id, match_len=len(n))
-                        )
-                    elif (new_name := strip_name(n)) in new_title:
-                        match_list_name_alias.append(
-                            Match_item(id=data.id, match_len=len(new_name))
-                        )
+                _add_match(n, data)
 
         # 特殊匹配
         _url = website_entry.page_link
@@ -479,14 +479,18 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             match_ani_special_ids = await self.match_ani_special(response.text)
             match_ani_from_text_ids = await self.match_ani_from_text(response.text)
 
+        match_ani_from_name = sorted_match_list(match_list_name)
         match_ani_from_name_ids = [
             it.id
             for it in (
-                *sorted_match_list(match_list_name),
-                *sorted_match_list(match_list_name_cn),
-                *sorted_match_list(match_list_name_alias),
+                [
+                    it
+                    for it in match_ani_from_name
+                    if (it.rank != 0 and it.match_len >= 3)
+                ]
+                or match_ani_from_name[:1]
             )
-        ]
+        ]  # 去除尾部过短和冷门匹配项
 
         log.debug(
             "{} match_ani_special: {} {} {}",
@@ -527,13 +531,11 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         while True:
             log.info("{} 进入第 {} 次循环", self.__class__.__name__, cycle_num)
 
+            # 提前删除旧数据，自动跳过算法会重新下载刚才删除的旧数据
             await self._del_data_unrefreshed()
 
             bgm_ani_all_data = await bgm_ani_all_data_getter()
-            async for website_entry in self.get_website_entry(
-                sleep_time=sleep_time,
-                fast_skip=bool(cycle_num & 1),
-            ):
+            async for website_entry in self.get_website_entry(sleep_time=sleep_time):
                 id_list: list[int] = await self.match_ani(
                     website_entry=website_entry, bgm_ani_datas=bgm_ani_all_data
                 )
@@ -542,8 +544,6 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
                         website_entry=website_entry, id_list=id_list
                     )
                 )
-
-            await self._add_data_unrefreshed_count()
 
             cycle_num += 1
             sleep_time = 1
@@ -562,7 +562,6 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         self,
         *,
         sleep_time: int,
-        fast_skip: bool,
     ) -> AsyncGenerator[Website_entry]:
         """
         从头到尾循环一遍网站的条目
@@ -595,9 +594,8 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             description="匹配的 Bangumi ID 列表", sa_column=Column(IdList)
         )
 
-        unrefreshed_count: int = sqlmodel.Field(
-            description="数据未刷新次数，长时间未更新则判定为已删除条目，将删除该条数据",
-            default=0,
+        update_time: datetime.datetime = sqlmodel.Field(
+            description="刷新时间", default_factory=datetime.datetime.now
         )
 
     @property
@@ -648,18 +646,6 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         ):
             return await session.get(self.Data_class, primary_k_v)
 
-    async def _add_data_unrefreshed_count(self) -> None:
-        """将所有未刷新次数 +1"""
-        async with (
-            self.DATABASE_LOCK,
-            AsyncSession(self.async_engine) as session,
-        ):
-            stmt = update(self.Data_class).values(
-                unrefreshed_count=self.Data_class.unrefreshed_count + 1
-            )
-            await session.exec(stmt)
-            await session.commit()
-
     async def _del_data_unrefreshed(self) -> None:
         """删除长时间未更新的数据"""
         async with (
@@ -667,7 +653,10 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             AsyncSession(self.async_engine) as session,
         ):
             stmt = delete(self.Data_class).where(
-                and_(self.Data_class.unrefreshed_count > self.UNREFRESHED_THRESHOLD)
+                and_(
+                    datetime.datetime.now() - self.Data_class.update_time
+                    > self.UPDATE_DEL_THRESHOLD
+                )
             )
             await session.exec(stmt)
             await session.commit()
