@@ -7,8 +7,10 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, override
 
 import httpx
+import pydantic
 import sqlmodel
 import zstandard
+from oidbt_bangumi_ani_getter.getter import DatetimeDecorator
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import (
@@ -230,6 +232,7 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
                     self.req.__name__,
                     req_num,
                 )
+                await asyncio.sleep(1)
                 if req_num > 9:
                     log.error(
                         "{} {} 重试次数过高，放弃重试",
@@ -273,7 +276,7 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         """
         根据 BT 发布页标题匹配 Bangumi ID
 
-        匹配度优先级: 特殊匹配 > 原名 > 中文名 > 别名
+        匹配度优先级: 特殊匹配 > 内容匹配 > 名称匹配
         同级内优先级: 匹配文本长度
 
         :return: Bangumi ID, 按匹配度排序
@@ -514,8 +517,13 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         *,
         website_entry: Website_entry,
         id_list: list[int],
+        only_refresh_data: Website_entry_data | None = None,
     ) -> Website_entry_data:
-        """条目处理为SQL条目"""
+        """
+        条目处理为SQL条目
+
+        :param only_refresh_data: 非 None 时表示只刷新非磁链数据，从该对象中获取磁链重新写入
+        """
         ...
 
     async def auto_req(
@@ -535,13 +543,25 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             await self._del_data_unrefreshed()
 
             bgm_ani_all_data = await bgm_ani_all_data_getter()
-            async for website_entry in self.get_website_entry(sleep_time=sleep_time):
+            async for website_entry in self.get_website_entry(
+                sleep_time=sleep_time, fast_skip=bool(cycle_num & 1)
+            ):
                 id_list: list[int] = await self.match_ani(
                     website_entry=website_entry, bgm_ani_datas=bgm_ani_all_data
                 )
                 await self.save_data(
                     self.website_entry_to_data(
-                        website_entry=website_entry, id_list=id_list
+                        website_entry=website_entry,
+                        id_list=id_list,
+                        only_refresh_data=(
+                            await self.get_data(
+                                website_entry.page_link.removeprefix(
+                                    self.page_link_head
+                                )
+                            )
+                            if website_entry.only_refresh
+                            else None
+                        ),
                     )
                 )
 
@@ -557,17 +577,21 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         torrent: bytes
         """种子文件数据"""
 
+        only_refresh: bool = pydantic.Field(default=False)
+        """只刷新非种子数据"""
+
     @abstractmethod
     def get_website_entry(
         self,
         *,
         sleep_time: int,
+        fast_skip: bool,
     ) -> AsyncGenerator[Website_entry]:
         """
         从头到尾循环一遍网站的条目
 
-        :param sleep_time: sec
-        :param fast_skip: 数据库内已有的种子不下载
+        :param sleep_time: 单位 sec
+        :param fast_skip: 以倍数增加的跳过数跳过数据库内已有的种子，并且不在不刷新种子时刷新其他信息（对应不能修改种子的平台，不同平台按不同覆写）
         """
         ...
 
@@ -595,7 +619,9 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
         )
 
         update_time: datetime.datetime = sqlmodel.Field(
-            description="刷新时间", default_factory=datetime.datetime.now
+            description="刷新时间",
+            default_factory=lambda: datetime.datetime.now().astimezone(),
+            sa_column=Column(DatetimeDecorator),
         )
 
     @property
@@ -652,11 +678,12 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             self.DATABASE_LOCK,
             AsyncSession(self.async_engine) as session,
         ):
-            stmt = delete(self.Data_class).where(
-                and_(
-                    datetime.datetime.now() - self.Data_class.update_time
-                    > self.UPDATE_DEL_THRESHOLD
-                )
-            )
-            await session.exec(stmt)
+            result = await session.exec(select(self.Data_class))
+            all_data = result.all()
+
+            now = datetime.datetime.now().astimezone()
+            for data in all_data:
+                if now - data.update_time > self.UPDATE_DEL_THRESHOLD:
+                    await session.delete(data)
+
             await session.commit()

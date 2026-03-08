@@ -22,9 +22,11 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         pass
 
     @property
+    @override
     def page_link_head(self) -> str:
         return "https://mikanani.me/Home/Episode/"
 
+    @override
     async def match_ani_special(self, html_text: str, /) -> list[int]:
         to_link = re.search(r"/Home/Bangumi/\d+", html_text)
         if to_link is None:
@@ -106,20 +108,23 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         *,
         website_entry: Base_bt_entry_getter.Website_entry,
         id_list: list[int],
+        only_refresh_data: Mikan_bt_entry_getter.Website_entry_data | None = None,
     ) -> Mikan_bt_entry_getter.Website_entry_data_mikan:
-        magnet = b""
-        try:
-            torrent = Torrent(website_entry.torrent)
-        except BencodeDecodeError as e:
-            log.error(
-                "Bencode 解码错误: {} from {} {}",
-                e,
-                website_entry.title,
-                website_entry.page_link,
-                deep=True,
-            )
-        else:
-            magnet = torrent.get_magnet(tr=False).encode()
+        if not (
+            magnet := b"" if only_refresh_data is None else only_refresh_data.magnet
+        ):
+            try:
+                torrent = Torrent(website_entry.torrent)
+            except BencodeDecodeError as e:
+                log.error(
+                    "Bencode 解码错误: {} from {} {}",
+                    e,
+                    website_entry.title,
+                    website_entry.page_link,
+                    deep=True,
+                )
+            else:
+                magnet = torrent.get_magnet(tr=False).encode()
 
         return self.Website_entry_data_mikan(
             title=website_entry.title,
@@ -133,6 +138,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         self,
         *,
         sleep_time: int,
+        fast_skip: bool,
     ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
         torrent_num: int = 0
         """记录本次循环下载的 torrent 数量"""
@@ -187,29 +193,30 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                         f"{self.__class__.__name__} RSS 的 XML 结构 <item><enclosure> 没有属性 url"
                     )
 
-                    if _data := await self.get_data(
-                        page_link.removeprefix(self.page_link_head)
-                    ):
+                    if (
+                        _data := await self.get_data(
+                            page_link.removeprefix(self.page_link_head)
+                        )
+                    ) and (fast_skip or _data.magnet):
+                        # fast_skip 模式跳过空种数据库条目，但非 fast_skip 模式重下空种条目
                         log.debug(
-                            "{} 跳过第 {} 个种子 {} {}",
+                            "{} 跳过下载第 {} 个种子 {} {}",
                             self.__class__.__name__,
                             torrent_num_new,
                             title,
                             page_link,
                             print_level=log.LogLevel._detail,
                         )
+                        if not fast_skip:
+                            # 跳过下载种子，但刷新数据库条目非种子信息，因为 mikan 的修改只能修改信息不能修改种子
+                            yield self.Website_entry(
+                                title=title,
+                                page_link=page_link,
+                                torrent=b"",
+                                only_refresh=True,
+                            )
                         torrent_num_new += 1
                         continue
-                    else:
-                        log.debug(
-                            "{} 跳过第 {} 个种子 {} {} 失败: data = {}",
-                            self.__class__.__name__,
-                            torrent_num_new,
-                            title,
-                            page_link,
-                            _data,
-                            print_level=log.LogLevel._detail,
-                        )
 
                     log.debug(
                         "{} 开始下载 {}",
@@ -296,10 +303,10 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         """页数"""
         skip_page_num: int = 1
         """跳过的页数"""
-        pre_page_num: int = 0
+        pre_page_num: int = 1
         """上次请求的页数"""
         while True:
-            all_skip: bool = True
+            all_skip: bool = True and fast_skip
             try:
                 async for website_entry in _req(page_num):
                     yield website_entry
@@ -325,10 +332,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 page_num += skip_page_num
             else:
                 skip_page_num = 1
-                if page_num < pre_page_num:
-                    page_num += 1
-                else:
-                    page_num = pre_page_num + 1
+                page_num = min(page_num, pre_page_num) + 1
             pre_page_num = _page_num
 
     @property
