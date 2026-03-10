@@ -1,16 +1,18 @@
 import asyncio
 import datetime
 import re
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, override
+from typing import TYPE_CHECKING, ClassVar, NoReturn, override
 
 import httpx
 import pydantic
 import sqlmodel
 import zstandard
+from bencode2 import BencodeDecodeError
 from oidbt_bangumi_ani_getter.getter import DatetimeDecorator
+from oidbt_torrent import Torrent
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import (
@@ -100,16 +102,16 @@ class CompressedBinary(TypeDecorator):
         return zstandard.decompress(value)
 
 
-class LockMeta(ABCMeta):
+class LockableBase:
     """为每个子类自动添加类级别的 lock"""
 
-    def __new__(mcls, name, bases, namespace, /, **kwargs: Any) -> LockMeta:
-        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
-        cls.REQ_LOCK = asyncio.Lock()  # pyright: ignore[reportAttributeAccessIssue]
-        return cls
+    @override
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        cls.REQ_LOCK = asyncio.Lock()
 
 
-class Base_bt_entry_getter(ABC, metaclass=LockMeta):
+class Base_bt_entry_getter(ABC, LockableBase):
     DATABASE_LOCK: ClassVar = asyncio.Lock()
     UPDATE_DEL_THRESHOLD: ClassVar = datetime.timedelta(days=30)
     REQ_LOCK: ClassVar[asyncio.Lock]
@@ -503,15 +505,24 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             match_ani_from_name_ids,
         )
 
+        res = dict.fromkeys(
+            match_ani_special_ids + match_ani_from_text_ids + match_ani_from_name_ids
+        )
+        if 0 in res:
+            log.warning(
+                "{} 匹配 ID 中有 0: {} {}",
+                self.__class__.__name__,
+                website_entry.title,
+                website_entry.page_link,
+                write_level=log.LogLevel.error,
+            )
         return list(
-            dict.fromkeys(
-                match_ani_special_ids
-                + match_ani_from_text_ids
-                + match_ani_from_name_ids
+            filter(
+                bool,  # 这个 filter 过滤排除 id = 0
+                res,
             )
         )
 
-    @abstractmethod
     def website_entry_to_data(
         self,
         *,
@@ -524,7 +535,28 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
 
         :param only_refresh_data: 非 None 时表示只刷新非磁链数据，从该对象中获取磁链重新写入
         """
-        ...
+        if not (
+            magnet := b"" if only_refresh_data is None else only_refresh_data.magnet
+        ):
+            try:
+                torrent = Torrent(website_entry.torrent)
+            except BencodeDecodeError as e:
+                log.error(
+                    "Bencode 解码错误: {} from {} {}",
+                    e,
+                    website_entry.title,
+                    website_entry.page_link,
+                    deep=True,
+                )
+            else:
+                magnet = torrent.get_magnet(tr=False).encode()
+
+        return self.Data_class(
+            title=website_entry.title,
+            page_link_point=self.primary_key_from_page_link(website_entry.page_link),
+            magnet=magnet,
+            match_id_list=id_list,
+        )
 
     async def auto_req(
         self,
@@ -535,7 +567,6 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     ) -> NoReturn:
         """自动循环爬取"""
         cycle_num: int = 1
-        sleep_time: Literal[0, 1] = 0
         while True:
             log.info("{} 进入第 {} 次循环", self.__class__.__name__, cycle_num)
 
@@ -543,9 +574,7 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
             await self._del_data_unrefreshed()
 
             bgm_ani_all_data = await bgm_ani_all_data_getter()
-            async for website_entry in self.get_website_entry(
-                sleep_time=sleep_time, fast_skip=bool(cycle_num & 1)
-            ):
+            async for website_entry in self.get_website_entry(cycle_num=cycle_num):
                 id_list: list[int] = await self.match_ani(
                     website_entry=website_entry, bgm_ani_datas=bgm_ani_all_data
                 )
@@ -555,9 +584,7 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
                         id_list=id_list,
                         only_refresh_data=(
                             await self.get_data(
-                                website_entry.page_link.removeprefix(
-                                    self.page_link_head
-                                )
+                                self.primary_key_from_page_link(website_entry.page_link)
                             )
                             if website_entry.only_refresh
                             else None
@@ -566,7 +593,6 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
                 )
 
             cycle_num += 1
-            sleep_time = 1
             bgm_ani_all_data = await bgm_ani_all_data_getter()
 
     class Website_entry(BaseModel):
@@ -584,20 +610,21 @@ class Base_bt_entry_getter(ABC, metaclass=LockMeta):
     def get_website_entry(
         self,
         *,
-        sleep_time: int,
-        fast_skip: bool,
+        cycle_num: int,
     ) -> AsyncGenerator[Website_entry]:
         """
         从头到尾循环一遍网站的条目
 
-        :param sleep_time: 单位 sec
-        :param fast_skip: 以倍数增加的跳过数跳过数据库内已有的种子，并且不在不刷新种子时刷新其他信息（对应不能修改种子的平台，不同平台按不同覆写）
+        :param cycle_num: 循环轮数，从 1 开始
         """
         ...
 
     @property
     @abstractmethod
     def page_link_head(self) -> str: ...
+
+    def primary_key_from_page_link(self, page_link: str) -> str:
+        return page_link.removeprefix(self.page_link_head)
 
     class Website_entry_data(SQLModel):
         """

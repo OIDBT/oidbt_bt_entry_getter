@@ -1,12 +1,11 @@
 import asyncio
 import re
 import xml.etree.ElementTree
+from functools import cache
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Literal, cast, override
 
 import httpx
-from bencode2 import BencodeDecodeError
-from oidbt_torrent import Torrent
 from pydantic import ValidationError
 
 from ..log import log
@@ -38,110 +37,102 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             return []
         to_link = "https://mikanani.me" + to_link.group()
         log.debug("to_link = {}", to_link)
-        while True:
-            try:
-                response = await self.req(to_link)
-            except self.req_fialed:
+
+        @cache
+        async def _get_id_from_to_link(to_link: str, /) -> list[int]:
+            while True:
+                try:
+                    response = await self.req(to_link)
+                except self.req_fialed:
+                    log.error(
+                        "{} {} 请求失败",
+                        self.__class__.__name__,
+                        self.match_ani_special.__name__,
+                    )
+                    continue
+                break
+
+            class _HTMLParser(HTMLParser):
+                """AI 写的解析逻辑"""
+
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.a_tag = None
+                    self.in_p = False
+                    self.p_class_match = False
+
+                def handle_starttag(self, tag, attrs) -> None:
+                    attrs_dict = dict(attrs)
+                    if tag == "p" and attrs_dict.get("class") == "bangumi-info":
+                        self.in_p = True
+                    elif tag == "a" and self.in_p:
+                        self.a_tag = attrs_dict
+
+                def handle_endtag(self, tag) -> None:
+                    if tag == "p":
+                        self.in_p = False
+
+            parser = _HTMLParser()
+            parser.feed(response.text)
+
+            a_tag = parser.a_tag
+            if a_tag is None:
                 log.error(
-                    "{} {} 请求失败",
+                    "{} {} 没找到 a 标签",
                     self.__class__.__name__,
                     self.match_ani_special.__name__,
                 )
-                continue
-            break
+                return []
 
-        class _HTMLParser(HTMLParser):
-            """AI 写的解析逻辑"""
-
-            def __init__(self) -> None:
-                super().__init__()
-                self.a_tag = None
-                self.in_p = False
-                self.p_class_match = False
-
-            def handle_starttag(self, tag, attrs) -> None:
-                attrs_dict = dict(attrs)
-                if tag == "p" and attrs_dict.get("class") == "bangumi-info":
-                    self.in_p = True
-                elif tag == "a" and self.in_p:
-                    self.a_tag = attrs_dict
-
-            def handle_endtag(self, tag) -> None:
-                if tag == "p":
-                    self.in_p = False
-
-        parser = _HTMLParser()
-        parser.feed(response.text)
-
-        a_tag = parser.a_tag
-        if a_tag is None:
-            log.error(
-                "{} {} 没找到 a 标签",
-                self.__class__.__name__,
-                self.match_ani_special.__name__,
-            )
-            return []
-
-        href = a_tag.get("href")
-        if href is None:
-            log.error(
-                "{} {} a 标签没有 href",
-                self.__class__.__name__,
-                self.match_ani_special.__name__,
-            )
-            return []
-
-        res = await self.match_ani_from_text(href)
-        if len(res) != 1:
-            log.error(
-                "{} {} a 标签的 href 格式错误: {}",
-                self.__class__.__name__,
-                self.match_ani_special.__name__,
-                href,
-            )
-
-        return res
-
-    @override
-    def website_entry_to_data(
-        self,
-        *,
-        website_entry: Base_bt_entry_getter.Website_entry,
-        id_list: list[int],
-        only_refresh_data: Mikan_bt_entry_getter.Website_entry_data | None = None,
-    ) -> Mikan_bt_entry_getter.Website_entry_data_mikan:
-        if not (
-            magnet := b"" if only_refresh_data is None else only_refresh_data.magnet
-        ):
-            try:
-                torrent = Torrent(website_entry.torrent)
-            except BencodeDecodeError as e:
+            href = a_tag.get("href")
+            if href is None:
                 log.error(
-                    "Bencode 解码错误: {} from {} {}",
-                    e,
-                    website_entry.title,
-                    website_entry.page_link,
-                    deep=True,
+                    "{} {} a 标签没有 href",
+                    self.__class__.__name__,
+                    self.match_ani_special.__name__,
                 )
-            else:
-                magnet = torrent.get_magnet(tr=False).encode()
+                return []
 
-        return self.Website_entry_data_mikan(
-            title=website_entry.title,
-            page_link_point=website_entry.page_link.removeprefix(self.page_link_head),
-            magnet=magnet,
-            match_id_list=id_list,
-        )
+            res = await self.match_ani_from_text(href)
+            if len(res) != 1:
+                log.error(
+                    "{} {} a 标签的 href 格式错误: {}",
+                    self.__class__.__name__,
+                    self.match_ani_special.__name__,
+                    href,
+                )
+
+            return res
+
+        return await _get_id_from_to_link(to_link)
 
     @override
     async def get_website_entry(
         self,
         *,
-        sleep_time: int,
-        fast_skip: bool,
+        cycle_num: int,
     ) -> AsyncGenerator[Mikan_bt_entry_getter.Website_entry]:
+        fast_skip_level: Literal[0, 1, 2] = cast(
+            "Literal[0, 1, 2]", max(0, 3 - cycle_num)
+        )
+        """
+        level:
+            2 以倍数增加的跳过数跳过数据库内已有的种子，并且跳过刷新其他信息
+            1 跳过数据库内已有的种子，并且跳过刷新其他信息
+            0 不跳过刷新其他信息，仅跳过下载种子
+        """
+        sleep_time = 0.2 if cycle_num >= 3 else 0
         torrent_num: int = 0
         """记录本次循环下载的 torrent 数量"""
+
+        log.info(
+            "{} {} 第 {} 次循环 fast_skip_level={} sleep_time={}",
+            self.__class__.__name__,
+            self.get_website_entry.__name__,
+            cycle_num,
+            fast_skip_level,
+            sleep_time,
+        )
 
         class req_end(Exception):
             pass
@@ -162,7 +153,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                     f"{self.__class__.__name__} RSS 的 XML 结构没有 <channel>"
                 )
                 xml_data_channel_items = xml_data_channel.findall("item")
-                if xml_data_channel_items is None:
+                if not xml_data_channel_items:
                     # 没有 item 意味着翻页结束
                     raise req_end
                 for item in xml_data_channel_items:
@@ -195,9 +186,9 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
 
                     if (
                         _data := await self.get_data(
-                            page_link.removeprefix(self.page_link_head)
+                            self.primary_key_from_page_link(page_link)
                         )
-                    ) and (fast_skip or _data.magnet):
+                    ) and (fast_skip_level or _data.magnet):
                         # fast_skip 模式跳过空种数据库条目，但非 fast_skip 模式重下空种条目
                         log.debug(
                             "{} 跳过下载第 {} 个种子 {} {}",
@@ -207,7 +198,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                             page_link,
                             print_level=log.LogLevel._detail,
                         )
-                        if not fast_skip:
+                        if not fast_skip_level:
                             # 跳过下载种子，但刷新数据库条目非种子信息，因为 mikan 的修改只能修改信息不能修改种子
                             yield self.Website_entry(
                                 title=title,
@@ -306,11 +297,14 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         pre_page_num: int = 1
         """上次请求的页数"""
         while True:
-            all_skip: bool = True and fast_skip
+            all_skip: bool = True and (fast_skip_level == 2)
             try:
                 async for website_entry in _req(page_num):
                     yield website_entry
                     all_skip = False
+                if not fast_skip_level and page_num % 6 == 0:
+                    async for website_entry in _req(1):
+                        yield website_entry
             except self.req_fialed as e:
                 log.warning("{} 单次请求失败: {}", self.__class__.__name__, e)
                 continue
@@ -328,11 +322,13 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             # 全部跳过则每次多跳，直到没有全跳时，从上次请求的位置开始重置
             _page_num = page_num
             if all_skip:
-                skip_page_num *= 2
                 page_num += skip_page_num
+                skip_page_num *= 2
             else:
                 skip_page_num = 1
-                page_num = min(page_num, pre_page_num) + 1
+                page_num = (
+                    min(page_num, pre_page_num) + 1 + (page_num == pre_page_num + 1)
+                )
             pre_page_num = _page_num
 
     @property

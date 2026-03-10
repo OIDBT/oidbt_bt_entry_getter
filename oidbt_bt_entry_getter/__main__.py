@@ -27,6 +27,9 @@ async def run_example():
     mikan_bt_entry_getter = Mikan_bt_entry_getter(
         database_filename=DATABASE_FILENAME, proxy=proxy_url
     )
+
+    Mikan_bt_entry_getter.DATABASE_LOCK = Bangumi_ani_getter.DATABASE_LOCK
+
     await asyncio.gather(
         bangumi_ani_getter.auto_req(),
         mikan_bt_entry_getter.auto_req(
