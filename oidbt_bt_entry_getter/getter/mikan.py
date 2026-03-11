@@ -243,7 +243,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                         except (
                             httpx.NetworkError,
                             httpx.RemoteProtocolError,
-                            httpx.ReadTimeout,
+                            httpx.TimeoutException,
                         ) as e:
                             log.warning(
                                 "{} 下载失败，重试: {} {!r}",
