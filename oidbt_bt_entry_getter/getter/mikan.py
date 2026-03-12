@@ -147,7 +147,16 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 url = f"https://mikanani.me/RSS/Classic/{page_num}"
                 response = await self.req(url)
 
-                xml_data = xml.etree.ElementTree.fromstring(response.text)
+                try:
+                    xml_data = xml.etree.ElementTree.fromstring(response.text)
+                except xml.etree.ElementTree.ParseError as e:
+                    log.error(
+                        "{} XML 解析错误 {} ，跳过该条 RSS: {}",
+                        self.__class__.__name__,
+                        e,
+                        response.text,
+                    )
+                    return
                 xml_data_channel = xml_data.find("channel")
                 assert xml_data_channel is not None, (
                     f"{self.__class__.__name__} RSS 的 XML 结构没有 <channel>"
