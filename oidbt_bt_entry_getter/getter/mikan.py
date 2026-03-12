@@ -44,7 +44,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                 try:
                     response = await self.req(to_link)
                 except self.req_fialed:
-                    log.error(
+                    log.warning(
                         "{} {} 请求失败",
                         self.__class__.__name__,
                         self.match_ani_special.__name__,

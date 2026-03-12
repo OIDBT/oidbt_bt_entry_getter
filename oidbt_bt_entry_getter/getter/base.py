@@ -186,7 +186,7 @@ class Base_bt_entry_getter(ABC, LockableBase):
                 )
 
             except httpx.HTTPStatusError as e:
-                log.error(
+                log.warning(
                     "{} 状态码错误: {} {}",
                     self.__class__.__name__,
                     e.response.status_code,
@@ -194,7 +194,7 @@ class Base_bt_entry_getter(ABC, LockableBase):
                 )
                 raise self.req_fialed from e
             except httpx.ConnectError as e:
-                log.error(
+                log.warning(
                     "{} 连接失败: {!r} {}", self.__class__.__name__, e, e.request.url
                 )
                 raise self.req_fialed from e
@@ -211,7 +211,7 @@ class Base_bt_entry_getter(ABC, LockableBase):
                 log.warning("{} 请求超时 {}", self.__class__.__name__, e.request.url)
                 raise self.req_fialed from e
             except httpx.NetworkError as e:
-                log.error(
+                log.warning(
                     "{} 未知网络错误: {} {!r} {}",
                     self.__class__.__name__,
                     e,
@@ -469,7 +469,7 @@ class Base_bt_entry_getter(ABC, LockableBase):
             try:
                 response = await self.req(_url)
             except self.req_fialed:
-                log.error(
+                log.warning(
                     "{} 请求失败 {}",
                     self.__class__.__name__,
                     _url,
@@ -543,6 +543,14 @@ class Base_bt_entry_getter(ABC, LockableBase):
             except BencodeDecodeError as e:
                 log.error(
                     "Bencode 解码错误: {} from {} {}",
+                    e,
+                    website_entry.title,
+                    website_entry.page_link,
+                    deep=True,
+                )
+            except Torrent.Parse_error as e:
+                log.error(
+                    "Torrent 解析错误: {} from {} {}",
                     e,
                     website_entry.title,
                     website_entry.page_link,
