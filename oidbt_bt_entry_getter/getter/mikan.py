@@ -239,16 +239,27 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                                 torrent_response.raise_for_status()
                                 torrent = await torrent_response.aread()
                         except httpx.HTTPStatusError as e:
-                            if e.response.status_code == 404:
-                                log.warning(
-                                    "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
-                                    self.__class__.__name__,
-                                    f"{title} {page_link}",
-                                )
-                                torrent_num_new += 1
-                                not_skip_download = False
-                                continue
-                            raise
+                            match e.response.status_code:
+                                case 404:
+                                    log.warning(
+                                        "{} 404 响应，可能不存在此文件，跳过此文件下载: {}",
+                                        self.__class__.__name__,
+                                        f"{title} {page_link}",
+                                    )
+                                    torrent_num_new += 1
+                                    not_skip_download = False
+                                case _ as sc:
+                                    _sleep_time = 10
+                                    log.error(
+                                        "{} {} 响应，等待 {}s 后重下载: {} {!r}",
+                                        self.__class__.__name__,
+                                        sc,
+                                        _sleep_time,
+                                        e,
+                                        e,
+                                    )
+                                    await asyncio.sleep(_sleep_time)
+                            continue
                         except (
                             httpx.NetworkError,
                             httpx.RemoteProtocolError,
