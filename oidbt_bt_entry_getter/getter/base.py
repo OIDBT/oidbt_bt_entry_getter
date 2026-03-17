@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import re
+import ssl
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cache
@@ -217,6 +218,16 @@ class Base_bt_entry_getter(ABC, LockableBase):
                     e,
                     e,
                     e.request.url,
+                    deep=True,
+                )
+                raise self.req_fialed from e
+            except ssl.SSLError as e:
+                log.warning(
+                    "{} SSL 错误: {} {!r} {}",
+                    self.__class__.__name__,
+                    e,
+                    e,
+                    url,
                     deep=True,
                 )
                 raise self.req_fialed from e
