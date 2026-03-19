@@ -1,5 +1,6 @@
 import asyncio
 import re
+import ssl
 import xml.etree.ElementTree
 from functools import cache
 from html.parser import HTMLParser
@@ -264,6 +265,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
                             httpx.NetworkError,
                             httpx.RemoteProtocolError,
                             httpx.TimeoutException,
+                            ssl.SSLError,
                         ) as e:
                             log.warning(
                                 "{} 下载失败，重试: {} {!r}",
