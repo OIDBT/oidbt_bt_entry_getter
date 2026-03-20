@@ -145,10 +145,11 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             torrent_num_new = torrent_num
             try:
                 log.debug(
-                    "{} 开始请求第 {} 页: 第 {} 次循环间隔 {}s",
+                    "{} 开始请求第 {} 页: 第 {} 次循环 fast_skip_level={} sleep_time={}",
                     self.__class__.__name__,
                     page_num,
                     cycle_num,
+                    fast_skip_level,
                     sleep_time,
                 )
                 url = f"https://mikanani.me/RSS/Classic/{page_num}"
