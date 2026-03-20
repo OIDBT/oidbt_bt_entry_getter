@@ -144,7 +144,13 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
             nonlocal torrent_num
             torrent_num_new = torrent_num
             try:
-                log.debug("{} 开始请求第 {} 页", self.__class__.__name__, page_num)
+                log.debug(
+                    "{} 开始请求第 {} 页: 第 {} 次循环间隔 {}s",
+                    self.__class__.__name__,
+                    page_num,
+                    cycle_num,
+                    sleep_time,
+                )
                 url = f"https://mikanani.me/RSS/Classic/{page_num}"
                 response = await self.req(url)
 

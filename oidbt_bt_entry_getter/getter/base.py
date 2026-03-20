@@ -114,7 +114,7 @@ class LockableBase:
 
 class Base_bt_entry_getter(ABC, LockableBase):
     DATABASE_LOCK: ClassVar = asyncio.Lock()
-    UPDATE_DEL_THRESHOLD: ClassVar = datetime.timedelta(days=30)
+    UPDATE_DEL_THRESHOLD: ClassVar = datetime.timedelta(days=90)
     REQ_LOCK: ClassVar[asyncio.Lock]
     """每个子类一个 lock"""
 
