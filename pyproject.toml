@@ -14,6 +14,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "async-lru>=2.3.0",
     "oidbt_bangumi_ani_getter @ git+https://github.com/OIDBT/oidbt_bangumi_ani_getter.git",
     "oidbt_torrent @ git+https://github.com/OIDBT/oidbt_torrent.git",
 ]

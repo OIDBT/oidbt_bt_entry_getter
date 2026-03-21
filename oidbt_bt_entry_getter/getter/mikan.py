@@ -2,10 +2,10 @@ import asyncio
 import re
 import ssl
 import xml.etree.ElementTree
-from functools import cache
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Literal, cast, override
 
+import async_lru
 import httpx
 from pydantic import ValidationError
 
@@ -39,7 +39,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         to_link = "https://mikanani.me" + to_link.group()
         log.debug("to_link = {}", to_link)
 
-        @cache
+        @async_lru.alru_cache(maxsize=None)
         async def _get_id_from_to_link(to_link: str, /) -> list[int]:
             while True:
                 try:
