@@ -26,6 +26,72 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
     def page_link_head(self) -> str:
         return "https://mikanani.me/Home/Episode/"
 
+    @async_lru.alru_cache(maxsize=None)
+    async def _get_id_from_to_link(self, to_link: str, /) -> list[int]:
+        while True:
+            try:
+                response = await self.req(to_link)
+            except self.req_fialed:
+                log.warning(
+                    "{} {} 请求失败",
+                    self.__class__.__name__,
+                    self.match_ani_special.__name__,
+                )
+                continue
+            break
+
+        class _HTMLParser(HTMLParser):
+            """AI 写的解析逻辑"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.a_tag = None
+                self.in_p = False
+                self.p_class_match = False
+
+            def handle_starttag(self, tag, attrs) -> None:
+                attrs_dict = dict(attrs)
+                if tag == "p" and attrs_dict.get("class") == "bangumi-info":
+                    self.in_p = True
+                elif tag == "a" and self.in_p:
+                    self.a_tag = attrs_dict
+
+            def handle_endtag(self, tag) -> None:
+                if tag == "p":
+                    self.in_p = False
+
+        parser = _HTMLParser()
+        parser.feed(response.text)
+
+        a_tag = parser.a_tag
+        if a_tag is None:
+            log.error(
+                "{} {} 没找到 a 标签",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+            )
+            return []
+
+        href = a_tag.get("href")
+        if href is None:
+            log.error(
+                "{} {} a 标签没有 href",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+            )
+            return []
+
+        res = await self.match_ani_from_text(href)
+        if len(res) != 1:
+            log.error(
+                "{} {} a 标签的 href 格式错误: {}",
+                self.__class__.__name__,
+                self.match_ani_special.__name__,
+                href,
+            )
+
+        return res
+
     @override
     async def match_ani_special(self, html_text: str, /) -> list[int]:
         to_link = re.search(r"/Home/Bangumi/\d+", html_text)
@@ -39,73 +105,7 @@ class Mikan_bt_entry_getter(Base_bt_entry_getter):
         to_link = "https://mikanani.me" + to_link.group()
         log.debug("to_link = {}", to_link)
 
-        @async_lru.alru_cache(maxsize=None)
-        async def _get_id_from_to_link(to_link: str, /) -> list[int]:
-            while True:
-                try:
-                    response = await self.req(to_link)
-                except self.req_fialed:
-                    log.warning(
-                        "{} {} 请求失败",
-                        self.__class__.__name__,
-                        self.match_ani_special.__name__,
-                    )
-                    continue
-                break
-
-            class _HTMLParser(HTMLParser):
-                """AI 写的解析逻辑"""
-
-                def __init__(self) -> None:
-                    super().__init__()
-                    self.a_tag = None
-                    self.in_p = False
-                    self.p_class_match = False
-
-                def handle_starttag(self, tag, attrs) -> None:
-                    attrs_dict = dict(attrs)
-                    if tag == "p" and attrs_dict.get("class") == "bangumi-info":
-                        self.in_p = True
-                    elif tag == "a" and self.in_p:
-                        self.a_tag = attrs_dict
-
-                def handle_endtag(self, tag) -> None:
-                    if tag == "p":
-                        self.in_p = False
-
-            parser = _HTMLParser()
-            parser.feed(response.text)
-
-            a_tag = parser.a_tag
-            if a_tag is None:
-                log.error(
-                    "{} {} 没找到 a 标签",
-                    self.__class__.__name__,
-                    self.match_ani_special.__name__,
-                )
-                return []
-
-            href = a_tag.get("href")
-            if href is None:
-                log.error(
-                    "{} {} a 标签没有 href",
-                    self.__class__.__name__,
-                    self.match_ani_special.__name__,
-                )
-                return []
-
-            res = await self.match_ani_from_text(href)
-            if len(res) != 1:
-                log.error(
-                    "{} {} a 标签的 href 格式错误: {}",
-                    self.__class__.__name__,
-                    self.match_ani_special.__name__,
-                    href,
-                )
-
-            return res
-
-        return await _get_id_from_to_link(to_link)
+        return await self._get_id_from_to_link(to_link)
 
     @override
     async def get_website_entry(
